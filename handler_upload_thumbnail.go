@@ -3,7 +3,11 @@ package main
 import (
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
@@ -31,7 +35,6 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 
 	fmt.Println("uploading thumbnail for video", videoID, "by user", userID)
 
-	// TODO: implement the upload here
 	const maxMemory = 10 << 20
 	err = r.ParseMultipartForm(maxMemory)
 	if err != nil {
@@ -44,13 +47,6 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		respondWithError(w, http.StatusInternalServerError, "Couldn't get form", err)
 		return
 	}
-	mediaType := tnHead.Header.Get("Content-Type")
-
-	dat, err := io.ReadAll(tn)
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Couldn't read data", err)
-		return
-	}
 
 	video, err := cfg.db.GetVideo(videoID)
 	if err != nil {
@@ -61,15 +57,41 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	thumbnail := thumbnail{
-		dat,
-		mediaType,
+	mediaType := tnHead.Header.Get("Content-Type")
+	ext, _, err := mime.ParseMediaType(mediaType)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Bad mime type provided", err)
+		return
 	}
-	videoThumbnails[videoID] = thumbnail
-	url := fmt.Sprintf("http://localhost:%s/api/thumbnails/%s", cfg.port, videoID) // TODO: surely i am not doing this correctly
-	video.ThumbnailURL = &url
+	switch ext {
+	case "image/png":
+	case "image/jpeg":
+	default:
+		respondWithError(w, http.StatusBadRequest, "Only jpeg or png supported", err)
+		return
+	} // bad
 
-	cfg.db.UpdateVideo(video)
+	s := strings.Split(ext, "/") // i can probably abstract this out later
+	ext = s[len(s)-1]
+	url := filepath.Join(cfg.assetsRoot, videoIDString+"."+ext)
+	f, err := os.Create(url)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't create thumbnail", err)
+		return
+	}
+	_, err = io.Copy(f, tn)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't copy data to thumbnail", err)
+		return
+	}
+
+	url = fmt.Sprintf("http://localhost:%s/%s", cfg.port, url)
+	video.ThumbnailURL = &url
+	err = cfg.db.UpdateVideo(video)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't update video", err)
+		return
+	}
 
 	respondWithJSON(w, http.StatusOK, video)
 }
